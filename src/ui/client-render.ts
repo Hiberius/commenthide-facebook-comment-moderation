@@ -107,7 +107,7 @@ function renderDryBanner(dryPosts) {
   text.textContent =
     countLabel(dryPosts.length, "watched post") +
     " running in dry run (" + truncate(names, 90) + "). " +
-    "Verdicts are recorded, nothing is hidden on Facebook.";
+    "Verdicts are recorded; the automatic check hides nothing on Facebook. Hiding a comment by hand still does.";
   banner.hidden = false;
 }
 

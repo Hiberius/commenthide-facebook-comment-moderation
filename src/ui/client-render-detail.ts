@@ -265,12 +265,23 @@ function commentNode(comment) {
   node.appendChild(tags);
 
   var side = el("div", "comment-side");
+  var verdict = comment.wouldBe || "keep";
+  var LABELS = {
+    hide: "Would hide", flag: "Would flag", keep: "Would keep", settled: "Already decided",
+  };
+  var ICONS_BY_VERDICT = {
+    hide: "eyeOff", flag: "flag", keep: "check", settled: "check",
+  };
   var would = el("span", "would");
-  would.setAttribute("data-v", comment.wouldBe || "keep");
-  would.appendChild(svgIcon(comment.wouldBe === "hide" ? "eyeOff" : comment.wouldBe === "flag" ? "flag" : "check"));
-  would.appendChild(el("span", null,
-    comment.wouldBe === "hide" ? "Would hide" : comment.wouldBe === "flag" ? "Would flag" : "Would keep"));
-  would.title = "What the current rule set would do to this comment right now";
+  would.setAttribute("data-v", verdict);
+  would.appendChild(svgIcon(ICONS_BY_VERDICT[verdict] || "check"));
+  would.appendChild(el("span", null, LABELS[verdict] || "Would keep"));
+  // "settled" means the poller will not revisit this comment, so no rule
+  // outcome can apply to it any more — saying "Would hide" there would promise
+  // something that is never going to happen.
+  would.title = verdict === "settled"
+    ? "This comment already carries a decision; the next check will leave it alone"
+    : "What the next check would do to this comment right now";
   side.appendChild(would);
 
   if (comment.isHidden) {

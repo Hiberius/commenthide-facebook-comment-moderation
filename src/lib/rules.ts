@@ -5,6 +5,21 @@
 // makes moderation explainable to a Page owner ("hidden because …") and what
 // makes this module testable without a single mock.
 
+import { MAX_REGEX_SOURCE } from "./rules-safety";
+
+// Re-exported so callers have one import path for "everything about rules".
+export { regexSafetyProblem } from "./rules-safety";
+export { DEFAULT_RULES } from "./rules-defaults";
+
+/**
+ * Characters of a comment a user-supplied regex is ever run against.
+ *
+ * Second line of defence. Deciding whether an arbitrary pattern backtracks is
+ * undecidable in general, so the creation-time guard is best-effort; bounding
+ * the input bounds what a pattern that slipped through can cost.
+ */
+const REGEX_INPUT_MAX = 400;
+
 import type {
   Decision,
   EvaluableComment,
@@ -16,9 +31,6 @@ import type {
 
 // --- tunables --------------------------------------------------------------
 
-/** A user regex longer than this is refused outright: long sources are where
- *  catastrophic backtracking lives, and no honest pattern needs more room. */
-const MAX_REGEX_SOURCE = 200;
 const DEFAULT_EMOJI_THRESHOLD = 5;
 const DEFAULT_MIN_LENGTH = 3;
 /** Reasons reach the audit log and the screen, so quoted evidence stays short. */
@@ -195,7 +207,10 @@ function keywordMatcher(pattern: string): Matcher | null {
 function regexMatcher(pattern: string): Matcher | null {
   const re = compileUserRegex(pattern);
   if (!re) return null;
-  return (comment) => firstMatch(re, messageOf(comment));
+  // Truncated on purpose: a pattern that slipped past the creation-time guard
+  // costs exponentially more on a longer comment, and no honest moderation rule
+  // needs to look past the first few hundred characters.
+  return (comment) => firstMatch(re, messageOf(comment).slice(0, REGEX_INPUT_MAX));
 }
 
 function emojiMatcher(threshold: number): Matcher {
@@ -372,26 +387,3 @@ export interface DefaultRuleSeed {
   label: string;
   priority: number;
 }
-
-/** Commercial bait only — scam funnels, spam and flooding. Nothing here fires
- *  on criticism, sarcasm or an angry-but-honest customer: hiding those is what
- *  this project refuses to automate. */
-const SPAM_KEYWORDS = [
-  "whatsapp me, click my profile, check my profile, link in my bio, dm me for",
-  "make money fast, double your money, guaranteed profit, guaranteed returns",
-  "earn from home, binary options, forex signals, crypto investment",
-  "bitcoin investment, recovery expert, free followers, buy followers",
-  "claim your prize, congratulations you won",
-  "investimento garantito, guadagno garantito, rendimento garantito",
-  "guadagna da casa, soldi facili, prestito garantito",
-  "contattami su whatsapp, scrivimi su whatsapp, clicca sul mio profilo",
-  "guarda il mio profilo, hai vinto un premio",
-].join(", ");
-
-export const DEFAULT_RULES: readonly DefaultRuleSeed[] = [
-  { kind: "link", pattern: "", action: "hide", label: "Links", priority: 10 },
-  { kind: "contact", pattern: "", action: "hide", label: "Contact details", priority: 20 },
-  { kind: "keyword", pattern: SPAM_KEYWORDS, action: "hide", label: "Known spam and scam phrases", priority: 30 },
-  { kind: "emoji_spam", pattern: "6", action: "hide", label: "Emoji flooding", priority: 40 },
-  { kind: "min_length", pattern: "2", action: "hide", label: "Empty or single-character comments", priority: 50 },
-];

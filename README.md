@@ -11,7 +11,7 @@
   <a href="LICENSE"><img alt="MIT licensed" src="https://img.shields.io/badge/license-MIT-5eead4"></a>
   <img alt="TypeScript strict" src="https://img.shields.io/badge/TypeScript-strict-818cf8">
   <img alt="Cloudflare Workers" src="https://img.shields.io/badge/Cloudflare-Workers%20%2B%20D1-c084fc">
-  <img alt="299 tests" src="https://img.shields.io/badge/tests-299%20passing-34d399">
+  <img alt="313 tests" src="https://img.shields.io/badge/tests-313%20passing-34d399">
   <img alt="No tracking" src="https://img.shields.io/badge/telemetry-none-8f9bb8">
 </p>
 
@@ -69,25 +69,29 @@ it buries genuine questions and honest criticism along with the spam, and it is 
 reason this category has a bad reputation.
 
 CommentHide evaluates every comment against your rule set and records **why** it reached
-each verdict. Here is the comment inspector on a real post, with the shipped starter
-rules and nothing customised:
+each verdict. Here is the comment inspector on a post in **dry run** — the shipped starter
+rules, nothing customised, and nothing yet touched on Facebook:
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/screenshot-inspector-dark.webp">
     <source media="(prefers-color-scheme: light)" srcset="assets/screenshot-inspector-light.webp">
-    <img alt="Comment inspector: spam comments hidden with a stated reason, honest criticism left visible" src="assets/screenshot-inspector-dark.webp" width="100%">
+    <img alt="Comment inspector in dry run: spam marked Would hide with a stated reason, honest criticism marked Would keep" src="assets/screenshot-inspector-dark.webp" width="100%">
   </picture>
 </p>
 
-The crypto bait, the follower farm and the wholesale-email drop are hidden, each labelled
-with the rule that caught it. *"Honestly the last bag was stale and shipping took nine
-days. Disappointed."* stays visible, because no rule matched it — and a moderation tool
-has no business hiding that.
+The crypto bait, the emoji flood and the follower farm are all marked **Would hide**, each
+labelled with the rule that caught it. *"Honestly the last bag was stale and shipping took
+nine days. Disappointed."* is marked **Would keep**, because no rule matched it — and a
+moderation tool has no business hiding that.
 
-That column on the right is the part worth dwelling on. **Would keep** and **would hide**
-show what your current rules would do to every comment *right now*, before you change
-anything. Edit a rule, reload, and see the consequence before it reaches Facebook.
+That column on the right is the part worth dwelling on. It shows what the **next check
+would actually do**, not what the rule set says in the abstract: a comment the tool has
+already settled reads *Already decided* rather than promising an outcome that will never
+happen. Edit a rule, reload, and see the consequence before it reaches Facebook.
+
+Leave the post in dry run for as long as you like. Switch dry run off and the very next
+check acts on exactly what the preview showed you.
 
 ---
 
@@ -97,10 +101,13 @@ anything. Edit a rule, reload, and see the consequence before it reaches Faceboo
   minimum length, and an author allowlist that overrides everything else.
 - **Dry run** — a watched post can evaluate and record every verdict while writing
   nothing to Facebook. Run it for a day, read the ledger, then switch it on for real.
-- **Starts from now** — activating a post marks the comments already on it as seen, so
-  switching CommentHide on can never touch existing conversation. It is the default.
+- **Starts from now** — activating a post records every comment already on it as seen, so
+  switching CommentHide on can never touch existing conversation. It is the default, it
+  pages to the end rather than sampling, and a post whose baseline did not complete is
+  refused by every code path that could poll it — cron, Run now, or the Active toggle.
 - **Multiple posts** — watch as many as you like, each with its own mode and rules.
-- **Replies** — optionally traverses reply threads, not just top-level comments.
+- **Replies** — optionally includes nested replies, at no extra API cost: the comments
+  edge returns them flattened when asked.
 - **Full audit trail** — every decision stored with its matched rule and reason.
 - **One-click undo** — restore a single comment, or every comment the tool hid on a post.
 - **Token encrypted at rest** — AES-256-GCM. It is never returned to the browser, never
@@ -229,7 +236,7 @@ Public variables in `wrangler.toml`:
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `GRAPH_API_VERSION` | `v25.0` | Graph API version segment |
-| `RETENTION_DAYS` | `30` | Prune audit rows older than this. `0` disables it. Hidden comments are never pruned — they are the undo trail. |
+| `RETENTION_DAYS` | `30` | Prune audit events older than this. `0` disables it. The comment ledger is never pruned: every row in it carries a standing decision, and deleting one would make the next check re-decide a comment it had already settled. |
 | `GRAPH_API_BASE` | unset | Development only. Points the client at a mock instead of Meta. |
 
 ---
@@ -309,7 +316,7 @@ npm test
 npm run test:coverage
 ```
 
-299 tests currently pass. The rule engine is pure and covered to 100% of statements; the
+313 tests currently pass. The rule engine is pure and covered to 100% of statements; the
 Graph client is tested against an injected `fetch` and never touches the network.
 
 <details>
@@ -402,6 +409,13 @@ dry-run setting and reply behaviour.
 **What does it cost to run?** On Cloudflare's free plan, typically nothing. One poll a
 minute is roughly 43,000 requests a month against a 100,000/day free allowance, and the
 D1 free tier covers the storage many times over.
+
+**How many posts can one deployment watch?** The real constraint is Cloudflare's cap of
+50 outbound subrequests per invocation on the free plan (1000 on paid). CommentHide
+budgets its reads so a run always keeps requests in hand for the hides themselves, and
+warns in the activity log rather than walking into the limit — but on the free plan,
+plan for a handful of busy posts rather than dozens. The paid Workers plan removes the
+constraint entirely.
 
 **Does anything leave my infrastructure?** Only the calls to Meta's Graph API. There is
 no telemetry, no analytics and no third-party request of any kind.

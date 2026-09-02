@@ -73,8 +73,13 @@ function summarise(postCount: number, summary: PollSummary): string {
 
 /**
  * Maps a Graph comment plus whatever we already recorded into the dashboard
- * shape, with `wouldBe` answering "what would the current rules do right now".
- * Pure — the routes layer reuses it to render a post without polling.
+ * shape. Pure — the routes layer reuses it to render a post without polling.
+ *
+ * `wouldBe` answers "what would the next poll actually do", not "what does the
+ * rule set say". Those differ, and reporting the raw verdict made the inspector
+ * promise consequences that could never happen: "Would hide" beside a comment
+ * the poller has already settled and will never revisit, or one Facebook has
+ * already refused to hide.
  */
 export function previewComment(
   comment: GraphComment,
@@ -83,17 +88,23 @@ export function previewComment(
   mode: PostMode,
 ): CommentView {
   const decision = evaluate(toEvaluable(comment), rules, mode);
+  const canHide = comment.can_hide !== false;
+  const isHidden = comment.is_hidden === true;
+
+  // The same two gates the poll loop applies after the rule engine has spoken.
+  const settled = !isReprocessable(existing) || (decision.verdict === "hide" && (isHidden || !canHide));
+
   return {
     id: comment.id,
     message: comment.message ?? "",
     createdTime: comment.created_time,
     authorName: comment.from?.name,
-    isHidden: comment.is_hidden === true,
+    isHidden,
     // Absent means the Page did not tell us otherwise; only an explicit false blocks.
-    canHide: comment.can_hide !== false,
+    canHide,
     status: existing?.status ?? null,
     reason: existing?.matched_reason ?? null,
-    wouldBe: decision.verdict,
+    wouldBe: settled ? "settled" : decision.verdict,
   };
 }
 
@@ -176,16 +187,20 @@ async function pollPost(
     const rules = await listRules(env.DB, post.post_id);
     // One lookup for the whole batch — never one query per comment.
     const known = await getComments(env.DB, comments.map((c) => c.id));
-    const ctx: PostContext = { env, client, target, post, rules, dryRun, token, now };
+    const ctx: PostContext = {
+      env, client, target, post, rules, dryRun, token, now,
+      maxAttempts: MAX_HIDE_ATTEMPTS,
+    };
 
     let tally = addTally(ZERO_TALLY, { fetched: comments.length });
     const hits = new Map<number, number>();
 
     for (const comment of comments) {
       const existing = known.get(comment.id);
-      // Decided comments are never revisited. An "error" row is the one
-      // exception, so a transient Graph failure gets another chance next run.
-      if (existing !== undefined && existing.status !== "error") continue;
+      // Decided comments are never revisited. Two exceptions: an "error" row
+      // still under the attempt cap gets another chance, and a dry-run row is
+      // only a preview — it must not stop the real run from acting later.
+      if (!isReprocessable(existing)) continue;
       try {
         const result = await processComment(ctx, comment);
         tally = addTally(tally, result.delta);
@@ -223,11 +238,52 @@ async function pollPost(
 // Run
 // ---------------------------------------------------------------------------
 
+/**
+ * A post whose baseline never completed must never be polled — not by the cron,
+ * not by "Run now", not by flipping Active. Its pre-existing comments were
+ * never recorded as seen, so a poll would evaluate conversation that predates
+ * the operator and hide whatever matched.
+ */
+export function isPollable(post: PostRow): boolean {
+  return post.baselined_at !== null;
+}
+
 async function selectPosts(env: Env, opts: PollOptions): Promise<PostRow[]> {
-  if (opts.onlyPostId === undefined) return listActivePosts(env.DB);
-  // "Run now" has to work on a paused post, so `active` is deliberately ignored.
-  const post = await getPost(env.DB, opts.onlyPostId);
-  return post === null ? [] : [post];
+  const candidates =
+    opts.onlyPostId === undefined
+      ? await listActivePosts(env.DB)
+      : // "Run now" has to work on a paused post, so `active` is deliberately
+        // ignored here — but the baseline gate below still applies.
+        await getPost(env.DB, opts.onlyPostId).then((post) => (post === null ? [] : [post]));
+
+  const pollable = candidates.filter(isPollable);
+  for (const post of candidates) {
+    if (isPollable(post)) continue;
+    await safeLog(env, {
+      level: "warn",
+      action: "poll_skipped",
+      post_id: post.post_id,
+      detail: "no_baseline",
+      error_message:
+        "The comments already on this post were never recorded, so polling it could hide " +
+        "conversation that predates CommentHide. Re-add the post to run the baseline.",
+    });
+  }
+  return pollable;
+}
+
+/**
+ * A hide that keeps failing is not worth retrying every sixty seconds forever;
+ * past this many attempts the row stays in `error` until the operator acts.
+ */
+export const MAX_HIDE_ATTEMPTS = 3;
+
+/** Whether the poller may still act on a comment it has a ledger row for. */
+export function isReprocessable(existing: CommentRow | undefined): boolean {
+  if (existing === undefined) return true;
+  // A dry run only previews; it must never settle the ledger.
+  if (existing.dry_run === 1) return true;
+  return existing.status === "error" && existing.attempts < MAX_HIDE_ATTEMPTS;
 }
 
 export async function runPoll(env: Env, opts: PollOptions = {}): Promise<PollSummary> {

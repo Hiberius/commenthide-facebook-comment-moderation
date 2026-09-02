@@ -132,7 +132,7 @@ export function recordAuthFailure(db: D1Database, fingerprint: string, now: numb
 export function clearAuthFailures(db: D1Database, fingerprint: string): Promise<void>
 
 // maintenance ---------------------------------------------------------------
-export function pruneHistory(db: D1Database, cutoffMs: number): Promise<{ events: number; comments: number }>
+export function pruneHistory(db: D1Database, cutoffMs: number): Promise<{ events: number; authAttempts: number }>
 export function globalTotals(db: D1Database): Promise<{ hidden: number; flagged: number; watched: number }>
 ```
 
@@ -304,7 +304,7 @@ on `'self'` only. Everything else is `'none'`; `connect-src 'self'`.
 
 ## HTTP API — routes own these exactly
 
-Mount under `/api`. Every route except `POST /api/session` and `GET /health`
+Mount under `/api`. Every route except `GET /`, `POST /api/session` and `GET /health`
 requires auth. Every non-GET `/api` route except `POST /api/session` requires CSRF.
 JSON in, JSON out. Errors: `{ error: string }` with a 4xx/5xx status.
 

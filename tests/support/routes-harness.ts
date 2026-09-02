@@ -193,10 +193,17 @@ export async function query<T>(sql: string, ...binds: string[]): Promise<T[]> {
 const TABLES = ["settings", "posts", "rules", "comments", "events", "auth_attempts"] as const;
 
 /**
- * Rebuilds the schema from the migration itself before emptying it, so a test
- * that drops a table on purpose cannot leave the next one without one.
+ * Rebuilds the schema from the migrations themselves, then empties it, so a
+ * test that drops a table on purpose cannot leave the next one without one.
+ *
+ * The tables are dropped first rather than replaying the migrations over a live
+ * schema: `ALTER TABLE ... ADD COLUMN` is not idempotent, so a plain replay
+ * fails on the second run with "duplicate column name".
  */
 export async function resetDatabase(): Promise<void> {
+  for (const table of [...TABLES].reverse()) {
+    await env.DB.prepare(`DROP TABLE IF EXISTS ${table}`).run();
+  }
   for (const migration of env.TEST_MIGRATIONS) {
     for (const statement of migration.queries) await env.DB.prepare(statement).run();
   }

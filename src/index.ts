@@ -26,8 +26,6 @@ const VERSION = "1.0.0";
 /** The only API request that may arrive without a session: logging in. */
 const LOGIN_PATH = "/api/session";
 
-/** Retention runs once an hour, on the tick the cron fires at minute zero. */
-const RETENTION_MINUTE = 0;
 
 const app = new Hono<AppEnv>();
 
@@ -73,9 +71,10 @@ function reportFailure(scope: string, err: unknown): void {
 }
 
 /**
- * The cron fires every minute. The poll runs on all of them; pruning runs on one
- * of them, keyed off the scheduled time rather than the wall clock so a delayed
- * invocation still prunes for the tick it was scheduled for.
+ * The cron fires every minute and both jobs run on every tick. Retention
+ * self-throttles to once an hour through a stored timestamp; tying it to a
+ * particular minute instead would mean it never ran at all on a Worker that
+ * missed that tick.
  */
 async function runSchedule(env: Env, scheduledTime: number): Promise<void> {
   try {
@@ -84,11 +83,8 @@ async function runSchedule(env: Env, scheduledTime: number): Promise<void> {
     reportFailure("scheduled poll failed", err);
   }
 
-  if (!Number.isFinite(scheduledTime)) return;
-  if (new Date(scheduledTime).getUTCMinutes() !== RETENTION_MINUTE) return;
-
   try {
-    await runRetention(env, scheduledTime);
+    await runRetention(env, Number.isFinite(scheduledTime) ? scheduledTime : Date.now());
   } catch (err) {
     reportFailure("scheduled retention failed", err);
   }

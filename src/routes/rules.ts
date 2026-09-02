@@ -6,6 +6,7 @@
 
 import { Hono } from "hono";
 import type { AppEnv, RuleAction, RuleKind } from "../types";
+import { regexSafetyProblem } from "../lib/rules";
 import {
   createRule,
   deleteRule,
@@ -53,16 +54,11 @@ function optionalPattern(body: JsonObject): Parsed<string | undefined> {
 /** Returns an error message, or null when the pattern suits the kind. */
 function patternProblem(kind: RuleKind, pattern: string): string | null {
   switch (kind) {
-    case "regex": {
-      if (pattern === "") return "a regex rule needs a pattern";
-      try {
-        new RegExp(pattern);
-      } catch {
-        // The engine would drop this rule as uncompilable; better to say so now.
-        return "pattern is not a valid regular expression";
-      }
-      return null;
-    }
+    case "regex":
+      // Delegated to the engine so the boundary enforces exactly what the
+      // engine will run — including the backtracking budget. Accepting a
+      // pattern the engine then silently refuses is its own kind of bug.
+      return regexSafetyProblem(pattern);
     case "keyword":
       return pattern === "" ? "a keyword rule needs at least one term" : null;
     case "author_allow":

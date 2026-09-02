@@ -9,11 +9,11 @@ import { env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { encryptToken } from "../src/lib/crypto";
-import { runPoll } from "../src/lib/poller";
+import { runPoll, MAX_HIDE_ATTEMPTS } from "../src/lib/poller";
 import { runRetention } from "../src/lib/retention";
 import {
   createRule, getComment, getPost, getRule, recentEvents, recordComment, setSetting,
-  upsertPost, type UpsertPostInput,
+  upsertPost, markBaselined, updatePost, claimComment, type UpsertPostInput,
 } from "../src/lib/storage";
 import type { CommentStatus, GraphComment, PollSummary } from "../src/types";
 
@@ -100,11 +100,31 @@ function spam(id: string, extra: CommentPatch = {}): GraphComment {
 
 const ALLOWED_BY = { from: { id: "u-allowed", name: ALLOWED_AUTHOR } };
 
+/** Any fixed instant; the poller only checks that a baseline exists. */
+const BASELINED_AT = 1_700_000_000_000;
+
 async function storeToken(): Promise<void> {
   await setSetting(env.DB, "page_token", await encryptToken(TOKEN, env.ENCRYPTION_KEY));
 }
 
-function watchPost(overrides: Omit<Partial<UpsertPostInput>, "post_id"> = {}) {
+/**
+ * A watched post, baselined. The poller refuses a post with no baseline — its
+ * pre-existing comments were never recorded, so polling it could hide
+ * conversation that predates the operator — so every fixture stamps one.
+ */
+async function watchPost(overrides: Omit<Partial<UpsertPostInput>, "post_id"> = {}) {
+  const row = await upsertPost(env.DB, {
+    post_id: POST_ID,
+    page_id: PAGE_ID,
+    active: true,
+    ...overrides,
+  });
+  await markBaselined(env.DB, POST_ID, BASELINED_AT);
+  return row;
+}
+
+/** A watched post whose baseline never completed. */
+function watchPostWithoutBaseline(overrides: Omit<Partial<UpsertPostInput>, "post_id"> = {}) {
   return upsertPost(env.DB, { post_id: POST_ID, page_id: PAGE_ID, active: true, ...overrides });
 }
 
@@ -357,6 +377,97 @@ describe("runPoll", () => {
     expectSummary(targeted, { fetched: 1, hidden: 1 });
     expect(stub.hideCalls).toEqual(["c-spam"]);
   });
+
+  it("refuses to poll a post whose baseline never completed", async () => {
+    // The pause on such a post is its whole safety mechanism: its pre-existing
+    // comments were never recorded, so polling it would hide conversation that
+    // predates the operator. "Run now" used to walk straight past it.
+    await storeToken();
+    await watchPostWithoutBaseline();
+    await hideKeywordRule();
+    const stub = installGraphStub({ comments: [spam("c-old-spam")] });
+
+    expectSummary(await runPoll(env), {});
+    expectSummary(await runPoll(env, { onlyPostId: POST_ID }), {});
+
+    expect(stub.hideCalls).toEqual([]);
+    expect(await eventActions()).toContain("poll_skipped");
+    expect(await eventDetails("poll_skipped")).toContain("no_baseline");
+  });
+
+  it("hides what a dry run previewed once dry run is switched off", async () => {
+    // A dry run must not settle the ledger. It used to write a terminal row for
+    // every comment it examined, so flipping dry_run off never hid any of them:
+    // only comments posted after the switch were ever acted on.
+    await storeToken();
+    await watchPost({ dry_run: true });
+    await hideKeywordRule();
+
+    const preview = installGraphStub({ comments: [spam("c-spam")] });
+    expectSummary(await runPoll(env), { fetched: 1, hidden: 1, dryRun: true });
+    expect(preview.hideCalls).toEqual([]);
+    expect((await getComment(env.DB, "c-spam"))?.dry_run).toBe(1);
+
+    await updatePost(env.DB, POST_ID, { dry_run: false });
+    const real = installGraphStub({ comments: [spam("c-spam")] });
+    expectSummary(await runPoll(env), { fetched: 1, hidden: 1 });
+
+    expect(real.hideCalls).toEqual(["c-spam"]);
+    const row = await getComment(env.DB, "c-spam");
+    expect(row?.status).toBe("hidden");
+    expect(row?.dry_run).toBe(0);
+  });
+
+  it("gives up on a comment whose hide keeps failing instead of retrying forever", async () => {
+    // A token with read but not manage permission fails every hide. Without a
+    // cap that was one Graph write per comment per minute, indefinitely.
+    await storeToken();
+    await watchPost();
+    await hideKeywordRule();
+
+    let attempts = 0;
+    for (let run = 0; run < 5; run += 1) {
+      const stub = installGraphStub({
+        comments: [spam("c-doomed")],
+        // A token with pages_read_engagement but not pages_manage_engagement.
+        hide: { "c-doomed": { status: 403, body: { error: { message: "no permission", code: 200 } } } },
+      });
+      await runPoll(env);
+      attempts += stub.hideCalls.length;
+    }
+
+    expect(attempts).toBe(MAX_HIDE_ATTEMPTS);
+    const row = await getComment(env.DB, "c-doomed");
+    expect(row?.status).toBe("error");
+    expect(row?.attempts).toBe(MAX_HIDE_ATTEMPTS);
+  });
+
+  it("claims a comment so two overlapping runs cannot both hide it", async () => {
+    // Cloudflare does not serialise scheduled invocations. Reading then writing
+    // let both runs see the comment as undecided: two hides, doubled counters.
+    await storeToken();
+    await watchPost();
+    await hideKeywordRule();
+
+    const first = installGraphStub({ comments: [spam("c-race")] });
+    const claimed = await claimComment(env.DB, {
+      comment_id: "c-race",
+      post_id: POST_ID,
+      maxAttempts: MAX_HIDE_ATTEMPTS,
+    });
+    expect(claimed).toBe(true);
+
+    // The second run finds the comment already claimed and leaves it alone.
+    expectSummary(await runPoll(env), { fetched: 1 });
+    expect(first.hideCalls).toEqual([]);
+
+    const again = await claimComment(env.DB, {
+      comment_id: "c-race",
+      post_id: POST_ID,
+      maxAttempts: MAX_HIDE_ATTEMPTS,
+    });
+    expect(again).toBe(false);
+  });
 });
 
 // runRetention -------------------------------------------------------------
@@ -369,32 +480,70 @@ describe("runRetention", () => {
 
     for (const days of [undefined, "", "0", "-5", "not-a-number"]) {
       const pruned = await runRetention({ ...env, RETENTION_DAYS: days }, now);
-      expect(pruned).toEqual({ events: 0, comments: 0 });
+      expect(pruned).toEqual({ events: 0, authAttempts: 0 });
     }
 
     expect(await eventActions()).toContain("ancient-event");
     expect(await getComment(env.DB, "c-ancient")).not.toBeNull();
   });
 
-  it("deletes old events and non-hidden comments while keeping hidden ones", async () => {
+  it("deletes old events but never touches the comment ledger", async () => {
     const now = Date.now();
     await seedEvent(now - 30 * DAY_MS, "ancient-event");
     await seedEvent(now - HOUR_MS, "recent-event");
     await seedComment("c-old-seen", "seen", now - 30 * DAY_MS);
     await seedComment("c-old-hidden", "hidden", now - 30 * DAY_MS);
+    await seedComment("c-old-restored", "restored", now - 30 * DAY_MS);
     await seedComment("c-new-seen", "seen", now - HOUR_MS);
 
     const result = await runRetention({ ...env, RETENTION_DAYS: "7" }, now);
 
-    expect(result).toEqual({ events: 1, comments: 1 });
+    expect(result.events).toBe(1);
     const actions = await eventActions();
     expect(actions).not.toContain("ancient-event");
     expect(actions).toContain("recent-event");
     expect(actions).toContain("retention");
 
-    // Hidden comments are the undo trail, so retention must never take them.
-    expect(await getComment(env.DB, "c-old-hidden")).not.toBeNull();
-    expect(await getComment(env.DB, "c-new-seen")).not.toBeNull();
-    expect(await getComment(env.DB, "c-old-seen")).toBeNull();
+    // The comments table is the idempotency ledger as well as the audit trail.
+    // Every row carries a standing decision: a baseline `seen` row is the only
+    // thing keeping a pre-existing comment out of scope, and a `restored` row
+    // is the only thing stopping a comment the operator un-hid from being
+    // hidden again. Pruning any of them makes the poller re-decide history.
+    for (const id of ["c-old-seen", "c-old-hidden", "c-old-restored", "c-new-seen"]) {
+      expect(await getComment(env.DB, id), `${id} must survive retention`).not.toBeNull();
+    }
+  });
+
+  it("re-hides nothing after a prune: a baselined comment stays out of scope", async () => {
+    // The regression this guards: retention used to delete the baseline rows,
+    // so on day 31 the poller saw pre-existing comments as new and hid them.
+    const now = Date.now();
+    await storeToken();
+    await watchPost();
+    await hideKeywordRule();
+    await seedComment("c-baselined-spam", "seen", now - 400 * DAY_MS);
+
+    await runRetention({ ...env, RETENTION_DAYS: "1" }, now);
+
+    const stub = installGraphStub({ comments: [spam("c-baselined-spam")] });
+    const summary = await runPoll(env);
+
+    expect(summary.hidden).toBe(0);
+    expect(stub.hideCalls).toEqual([]);
+  });
+
+  it("only runs once an hour, whatever minute the cron fires on", async () => {
+    const now = Date.now();
+    await seedEvent(now - 30 * DAY_MS, "ancient-event");
+
+    const first = await runRetention({ ...env, RETENTION_DAYS: "7" }, now);
+    expect(first.events).toBe(1);
+
+    await seedEvent(now - 30 * DAY_MS, "another-ancient-event");
+    const second = await runRetention({ ...env, RETENTION_DAYS: "7" }, now + 60_000);
+    expect(second).toEqual({ events: 0, authAttempts: 0 });
+
+    const later = await runRetention({ ...env, RETENTION_DAYS: "7" }, now + 2 * HOUR_MS);
+    expect(later.events).toBe(1);
   });
 });

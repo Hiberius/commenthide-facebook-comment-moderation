@@ -13,6 +13,7 @@ export {
   bumpPostCounters,
   touchPostChecked,
   type UpsertPostInput,
+  markBaselined,
 } from "./posts";
 
 export {
@@ -36,6 +37,8 @@ export {
   markRestored,
   countByStatus,
   type RecordCommentInput,
+  claimComment,
+  recordFailedAttempt,
 } from "./comments";
 
 export { logEvent, recentEvents, type EventInput } from "./events";

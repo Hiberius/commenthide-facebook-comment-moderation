@@ -33,10 +33,14 @@ export interface RecordCommentInput {
 }
 
 const COMMENT_COLUMNS = `comment_id, post_id, status, matched_rule_id, matched_reason,
-  author_name, message_preview, dry_run, first_seen_at, actioned_at, error_message`;
+  author_name, message_preview, dry_run, first_seen_at, actioned_at, error_message, attempts`;
 
-/** D1 caps bound parameters per statement; 100 ids per IN clause stays well under. */
-const ID_CHUNK_SIZE = 100;
+/**
+ * D1 caps bound parameters per statement at 100. Sitting exactly on the ceiling
+ * leaves no room for a statement that ever gains another placeholder, so this
+ * stays deliberately under it.
+ */
+const ID_CHUNK_SIZE = 90;
 const DEFAULT_LIST_LIMIT = 100;
 const MAX_LIST_LIMIT = 500;
 const PREVIEW_MAX = 240;
@@ -65,6 +69,7 @@ function toCommentRow(raw: RawRow): CommentRow {
     first_seen_at: asInt(raw.first_seen_at),
     actioned_at: asNullableInt(raw.actioned_at),
     error_message: asNullableText(raw.error_message),
+    attempts: asInt(raw.attempts),
   };
 }
 
@@ -109,6 +114,54 @@ export async function getComments(
 }
 
 /**
+ * Atomically claims a comment for processing.
+ *
+ * Cloudflare does not serialise scheduled invocations, so two runs can overlap
+ * and both read the same comment as undecided. Reading then writing would let
+ * both act on it: two hide calls to Facebook and a permanently doubled counter.
+ * Claiming instead makes the ledger row itself the lock — the loser of the race
+ * sees `changes === 0` and skips the comment entirely.
+ *
+ * A row is claimable when it does not exist, when a previous attempt errored
+ * and is still under the attempt cap, or when the only record of it is a dry-run
+ * preview (a preview must never settle the ledger).
+ */
+export async function claimComment(
+  db: D1Database,
+  input: { comment_id: string; post_id: string; maxAttempts: number },
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `INSERT INTO comments
+         (comment_id, post_id, status, dry_run, first_seen_at, attempts)
+       VALUES (?, ?, 'seen', 0, ?, 0)
+       ON CONFLICT(comment_id) DO UPDATE SET
+         post_id       = excluded.post_id,
+         status        = 'seen',
+         dry_run       = 0,
+         error_message = NULL
+       WHERE comments.dry_run = 1
+          OR (comments.status = 'error' AND comments.attempts < ?)`,
+    )
+    .bind(input.comment_id, input.post_id, nowMs(), input.maxAttempts)
+    .run();
+
+  return asInt(result.meta.changes) > 0;
+}
+
+/** Records a failed hide and advances the attempt counter in one statement. */
+export async function recordFailedAttempt(
+  db: D1Database,
+  input: RecordCommentInput,
+): Promise<void> {
+  await recordComment(db, { ...input, status: "error" });
+  await db
+    .prepare("UPDATE comments SET attempts = attempts + 1 WHERE comment_id = ?")
+    .bind(input.comment_id)
+    .run();
+}
+
+/**
  * Insert, or refresh a row the poller is allowed to re-decide (an `error` row).
  * first_seen_at is never rewritten — it is what "new since" means everywhere
  * else in the app.
@@ -129,7 +182,8 @@ export async function recordComment(db: D1Database, input: RecordCommentInput): 
          message_preview = COALESCE(excluded.message_preview, comments.message_preview),
          dry_run         = excluded.dry_run,
          actioned_at     = COALESCE(excluded.actioned_at, comments.actioned_at),
-         error_message   = excluded.error_message`,
+         error_message   = excluded.error_message,
+         attempts        = CASE WHEN excluded.status = 'error' THEN comments.attempts ELSE 0 END`,
     )
     .bind(
       input.comment_id,
@@ -209,5 +263,5 @@ export async function countByStatus(
     // An unrecognised status means the schema moved on; ignore it rather than
     // failing the whole dashboard request.
     return status === null ? counts : { ...counts, [status]: asInt(raw.total) };
-  }, EMPTY_COUNTS);
+  }, { ...EMPTY_COUNTS });
 }

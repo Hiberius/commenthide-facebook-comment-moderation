@@ -72,7 +72,10 @@ function authOf(init: unknown): string | null {
  * Retries default to 0 so a stray call cannot hide inside a backoff loop; the
  * retry suite opts back in explicitly.
  */
-function makeClient(replies: readonly Reply[], opts: { maxRetries?: number } = {}) {
+function makeClient(
+  replies: readonly Reply[],
+  opts: { maxRetries?: number; onWarning?: (message: string) => void } = {},
+) {
   const calls: GraphCall[] = [];
   const delays: number[] = [];
   const fetchImpl = (async (input: unknown, init?: unknown): Promise<Response> => {
@@ -98,6 +101,7 @@ function makeClient(replies: readonly Reply[], opts: { maxRetries?: number } = {
     sleep: async (ms: number) => {
       delays.push(ms);
     },
+    ...(opts.onWarning === undefined ? {} : { onWarning: opts.onWarning }),
   });
   return { client, calls, delays };
 }
@@ -235,7 +239,7 @@ describe("GraphClient.fetchComments", () => {
 
     expect(ids(comments)).toEqual(["c1", "c2", "c3"]);
     expect(calls).toHaveLength(2);
-    expect(at(calls, 0).url).toContain("filter=stream");
+    expect(at(calls, 0).url).toContain("filter=toplevel");
     expect(at(calls, 1).url).toContain("after=CURSOR_1");
   });
 
@@ -256,19 +260,55 @@ describe("GraphClient.fetchComments", () => {
     expect(ids(comments)).toEqual(["c1", "c2", "c3"]);
   });
 
-  it("fetches replies only for comments that report a reply count", async () => {
+  it("asks for replies through filter=stream rather than a call per parent", async () => {
+    // filter=stream returns replies flattened into the same list. An earlier
+    // version walked each parent's own reply edge instead, spending up to 25
+    // extra subrequests per poll to re-fetch comments this one call already
+    // returned — half the free plan's whole per-invocation budget.
     const { client, calls } = makeClient([
-      page([comment("c1", { comment_count: 2 }), comment("c2", { comment_count: 0 }), comment("c3")]),
-      page([comment("c1_r1"), comment("c1_r2")]),
+      page([comment("c1", { comment_count: 2 }), comment("c1_r1"), comment("c1_r2")]),
     ]);
 
     const comments = expectOk(await client.fetchComments(TARGET, { includeReplies: true }));
 
-    expect(ids(comments)).toEqual(["c1", "c2", "c3", "c1_r1", "c1_r2"]);
-    expect(calls).toHaveLength(2);
-    expect(at(calls, 1).url).toContain("/c1/comments?");
-    expect(calls.some((c) => c.url.includes("/c2/comments"))).toBe(false);
-    expect(calls.some((c) => c.url.includes("/c3/comments"))).toBe(false);
+    expect(ids(comments)).toEqual(["c1", "c1_r1", "c1_r2"]);
+    expect(calls).toHaveLength(1);
+    expect(at(calls, 0).url).toContain("filter=stream");
+    expect(calls.some((c) => c.url.includes("/c1/comments"))).toBe(false);
+  });
+
+  it("keeps walking when a page comes back empty but still carries a cursor", async () => {
+    // A window whose comments were all deleted returns no rows alongside a live
+    // cursor. Treating that as the end of the edge dropped everything behind it.
+    const { client } = makeClient([page([], NEXT_2), page([comment("c1"), comment("c2")])]);
+
+    expect(ids(expectOk(await client.fetchComments(TARGET, { maxPages: 3 })))).toEqual(["c1", "c2"]);
+  });
+
+  it("warns instead of silently truncating when the page cap is reached", async () => {
+    const warnings: string[] = [];
+    const { client } = makeClient(
+      [page([comment("c1")], NEXT_2), page([comment("c2")], NEXT_3)],
+      { onWarning: (m) => warnings.push(m) },
+    );
+
+    const comments = expectOk(await client.fetchComments(TARGET, { maxPages: 2 }));
+
+    expect(ids(comments)).toEqual(["c1", "c2"]);
+    expect(warnings.join(" ")).toContain("more remain");
+  });
+
+  it("refuses to send the token to a paging cursor on another origin", async () => {
+    // paging.next is attacker-influenced data: it arrives inside a response
+    // body, and every request carries the Page token in a header.
+    const { client, calls } = makeClient([
+      page([comment("c1")], "https://attacker.example/collect?x=1"),
+    ]);
+
+    const result = await client.fetchComments(TARGET, { maxPages: 3 });
+
+    expect(result.ok).toBe(false);
+    expect(calls.some((c) => c.url.includes("attacker.example"))).toBe(false);
   });
 
   it("leaves replies alone when includeReplies is off", async () => {

@@ -15,7 +15,7 @@ import type {
 import { redact } from "./crypto";
 import type { GraphClient } from "./graph";
 import { evaluate } from "./rules";
-import { logEvent, recordComment } from "./storage";
+import { claimComment, logEvent, recordComment, recordFailedAttempt } from "./storage";
 
 /** Longest message excerpt kept on a comment row. */
 export const PREVIEW_MAX = 140;
@@ -68,6 +68,8 @@ export interface PostContext {
   readonly dryRun: boolean;
   readonly token: string;
   readonly now: number;
+  /** Failed hide attempts after which a comment is left alone. */
+  readonly maxAttempts: number;
 }
 
 export interface CommentResult {
@@ -164,13 +166,31 @@ export async function processComment(
     return { delta: { hidden: 1 }, ruleId: decision.ruleId };
   }
 
+  // Claim the comment in the ledger BEFORE calling Facebook. Cloudflare does
+  // not serialise scheduled invocations, so without this two overlapping runs
+  // would both read the comment as undecided and both hide it — a duplicate
+  // Graph write and a permanently doubled counter. The claim is a conditional
+  // upsert: exactly one run wins, the other skips.
+  //
+  // Losing the Worker between the claim and the write leaves the comment
+  // recorded as seen and therefore unhidden. That is the safe direction to
+  // fail: this tool must under-hide rather than act twice.
+  const claimed = await claimComment(env.DB, {
+    comment_id: comment.id,
+    post_id: post.post_id,
+    maxAttempts: ctx.maxAttempts,
+  });
+  if (!claimed) {
+    return { delta: { skipped: 1 }, ruleId: decision.ruleId };
+  }
+
   const hide = await ctx.client.setHidden(ctx.target, comment.id, true);
   // Graph can answer 200 with {"success": false}; that is a refusal, not a hide.
   if (!hide.ok || hide.data.success !== true) {
     const message = hide.ok
       ? "Facebook accepted the request but did not hide the comment"
       : redact(hide.message, ctx.token);
-    await recordComment(env.DB, { ...base, status: "error", error_message: message });
+    await recordFailedAttempt(env.DB, { ...base, status: "error", error_message: message });
     await safeLog(env, {
       level: "error",
       action: "hide_failed",

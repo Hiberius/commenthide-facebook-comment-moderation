@@ -156,9 +156,23 @@ async function signIssuedAt(issuedAt: number, secret: string): Promise<string> {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+/**
+ * The key material the signature is taken over. Production mixes a digest of
+ * the current password into it so that rotating ADMIN_PASSWORD invalidates
+ * every session issued under the old one; a forged test cookie has to do the
+ * same or it will not verify.
+ */
+async function keyMaterial(password = env.ADMIN_PASSWORD): Promise<string> {
+  const enc = new TextEncoder();
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(password ?? "")));
+  const hex = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${env.SESSION_SECRET}\n${hex}`;
+}
+
 /** A `__Host-` session cookie header value signed for an arbitrary issuedAt. */
-export async function sessionCookie(issuedAt: number): Promise<string> {
-  return `__Host-ch_session=${issuedAt}.${await signIssuedAt(issuedAt, env.SESSION_SECRET)}`;
+export async function sessionCookie(issuedAt: number, password?: string): Promise<string> {
+  const material = await keyMaterial(password);
+  return `__Host-ch_session=${issuedAt}.${await signIssuedAt(issuedAt, material)}`;
 }
 
 export function nowSec(): number {

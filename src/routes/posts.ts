@@ -24,6 +24,7 @@ import {
   recordComment,
   updatePost,
   upsertPost,
+  markBaselined,
 } from "../lib/storage";
 import inspect from "./posts-inspect";
 import {
@@ -137,7 +138,11 @@ async function runBaseline(
   postId: string,
   includeReplies: boolean,
 ): Promise<BaselineOutcome> {
-  const existing = await client.fetchComments(target, { includeReplies });
+  // Exhaustive on purpose. Activation is a one-off, and a baseline that stopped
+  // at a page cap would leave older comments unrecorded — the poller would then
+  // hide conversation that pre-dates the operator, which is the one thing
+  // activation promises cannot happen.
+  const existing = await client.fetchComments(target, { includeReplies, exhaustive: true });
   if (!existing.ok) return { safe: false, recorded: 0, error: existing.message };
   return {
     safe: true,
@@ -150,7 +155,11 @@ function describeCreate(
   test: ConnectionTest,
   wantsBaseline: boolean,
   baseline: BaselineOutcome,
+  deliberatelyPaused = false,
 ): string {
+  if (test.ok && baseline.safe && deliberatelyPaused) {
+    return "Post updated. It stays paused because you paused it — switch it on with the Active toggle.";
+  }
   if (!test.ok) {
     return `Post saved but left paused: ${test.error ?? "the connection test failed."}`;
   }
@@ -188,6 +197,12 @@ posts.post("/posts", async (c) => {
     ? resolved.data.postId
     : normalizePostInput(input.value.postId) || input.value.postId;
 
+  // Read before the upsert, which rewrites `active`. Re-adding a post the
+  // operator deliberately paused must not switch it back on behind their back.
+  const priorRow = await getPost(c.env.DB, canonicalId);
+  const deliberatelyPaused =
+    priorRow !== null && priorRow.active === 0 && priorRow.baselined_at !== null;
+
   // Stored inactive first. Everything below can still fail, and a half-configured
   // post that is already live is exactly the failure mode this avoids.
   const stored = await upsertPost(c.env.DB, {
@@ -211,7 +226,12 @@ posts.post("/posts", async (c) => {
 
   // Activating without a completed baseline would put pre-existing comments in
   // scope, which is precisely what the baseline promises will never happen.
-  const activate = test.ok && baseline.safe;
+  // Recorded as a fact on the row rather than inferred from `active`: "Run now"
+  // and the Active toggle both used to bypass a pause whose only meaning was
+  // "this post was never baselined".
+  if (baseline.safe) await markBaselined(c.env.DB, canonicalId, Date.now());
+
+  const activate = test.ok && baseline.safe && !deliberatelyPaused;
   if (activate) await updatePost(c.env.DB, canonicalId, { active: true });
 
   const post = await getPost(c.env.DB, canonicalId);
@@ -236,7 +256,7 @@ posts.post("/posts", async (c) => {
       applied: wantsBaseline && baseline.error === null,
       recorded: baseline.recorded,
     },
-    message: describeCreate(test, wantsBaseline, baseline),
+    message: describeCreate(test, wantsBaseline, baseline, deliberatelyPaused),
   });
 });
 

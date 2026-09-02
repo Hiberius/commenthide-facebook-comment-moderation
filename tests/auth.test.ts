@@ -192,15 +192,19 @@ describe("requireAuth", () => {
     );
     expect(res.status).toBe(401);
 
+    // A misconfigured Worker answers exactly like a wrong password. Naming the
+    // missing secret told an anonymous caller how the deployment is set up.
     const attempt = await loginRequest(app, client, PASSWORD, HTTPS, broken);
-    expect((await json(attempt)).error).toMatch(/SESSION_SECRET/);
+    expect(attempt.status).toBe(401);
+    expect((await json(attempt)).error).toBe("Incorrect password.");
+    expect(cookieJar(attempt).size).toBe(0);
   });
 
   it("refuses to log in when ADMIN_PASSWORD is not configured", async () => {
     const res = await loginRequest(buildApp(), client, "", HTTPS, withEnv({ ADMIN_PASSWORD: "" }));
 
     expect(res.status).toBe(401);
-    expect((await json(res)).error).toMatch(/ADMIN_PASSWORD/);
+    expect((await json(res)).error).toBe("Incorrect password.");
     expect(cookieJar(res).size).toBe(0);
   });
 });
@@ -328,20 +332,63 @@ describe("login throttling", () => {
     expect(Number(row?.failures ?? -1)).toBe(1);
   });
 
-  it("throttles per client fingerprint, not globally", async () => {
+  it("throttles per IP, and a different IP is unaffected", async () => {
     const app = buildApp();
-    const other: Client = { ip: client.ip, ua: "vitest/throttle-other" };
+    const elsewhere: Client = { ip: "203.0.113.99", ua: client.ua };
 
     for (let attempt = 0; attempt < 8; attempt += 1) await loginRequest(app, client, "wrong");
     expect((await json(await loginRequest(app, client, "wrong"))).retryAfterSec ?? 0).toBeGreaterThan(
       0,
     );
 
-    const unaffected = await json(await loginRequest(app, other, "wrong"));
+    const unaffected = await json(await loginRequest(app, elsewhere, "wrong"));
     expect(unaffected.error).toBe("Incorrect password.");
     expect(unaffected.retryAfterSec).toBeUndefined();
 
-    const stillFine = await loginRequest(app, other, PASSWORD);
+    const stillFine = await loginRequest(app, elsewhere, PASSWORD);
     expect(stillFine.status).toBe(200);
+  });
+
+  it("cannot be escaped by varying the User-Agent from the same IP", async () => {
+    // The fingerprint used to hash the IP together with the User-Agent, a field
+    // the attacker chooses. Changing it produced a fresh bucket on every
+    // request, so the lockout never triggered at all.
+    const app = buildApp();
+
+    for (let attempt = 0; attempt < 9; attempt += 1) {
+      await loginRequest(app, { ip: client.ip, ua: `vitest/agent-${attempt}` }, "wrong");
+    }
+
+    const blocked = await json(
+      await loginRequest(app, { ip: client.ip, ua: "vitest/agent-fresh" }, "wrong"),
+    );
+    expect(blocked.retryAfterSec ?? 0).toBeGreaterThan(0);
+
+    // And the lock is not an oracle: the correct password is refused too.
+    const withRightPassword = await loginRequest(
+      app,
+      { ip: client.ip, ua: "vitest/agent-another" },
+      PASSWORD,
+    );
+    expect(withRightPassword.status).toBe(401);
+  });
+
+  it("invalidates every existing session when ADMIN_PASSWORD is rotated", async () => {
+    const app = buildApp();
+    const cookie = cookieHeader(cookieJar(await loginRequest(app, client, PASSWORD)));
+
+    const before = await call(app, `${HTTPS}/private/ping`, {
+      headers: headersFor(client, { cookie }),
+    });
+    expect(before.status).toBe(200);
+
+    const rotated = withEnv({ ADMIN_PASSWORD: "a-completely-different-passphrase" });
+    const after = await call(
+      app,
+      `${HTTPS}/private/ping`,
+      { headers: headersFor(client, { cookie }) },
+      rotated,
+    );
+    expect(after.status).toBe(401);
   });
 });

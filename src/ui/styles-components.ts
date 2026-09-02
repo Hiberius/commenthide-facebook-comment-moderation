@@ -271,6 +271,7 @@ select.input { appearance:none; padding-right:34px;
 .would[data-v="hide"] { color:var(--danger); }
 .would[data-v="flag"] { color:var(--warn); }
 .would[data-v="keep"] { color:var(--text-dim); }
+.would[data-v="settled"] { color:var(--text-dim); opacity:.65; border-style:solid; }
 .would svg { width:13px; height:13px; }
 @media (max-width:640px) {
   .comment { grid-template-columns:minmax(0,1fr); }

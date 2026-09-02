@@ -16,6 +16,18 @@ import {
   type RawRow,
 } from "./internal";
 
+/** Stamps a post as baselined. Only applyBaseline may call this. */
+export async function markBaselined(
+  db: D1Database,
+  postId: string,
+  when: number,
+): Promise<void> {
+  await db
+    .prepare("UPDATE posts SET baselined_at = ?, updated_at = ? WHERE post_id = ?")
+    .bind(when, nowMs(), postId)
+    .run();
+}
+
 export interface UpsertPostInput {
   post_id: string;
   page_id?: string | null;
@@ -29,7 +41,7 @@ export interface UpsertPostInput {
 
 const POST_COLUMNS = `id, post_id, page_id, label, permalink_url, active, mode, dry_run,
   include_replies, total_hidden, total_flagged, last_checked_at, last_hidden_at,
-  created_at, updated_at`;
+  baselined_at, created_at, updated_at`;
 
 /** The only column names updatePost may ever write. Never derived from input. */
 const POST_PATCH_COLUMNS = [
@@ -57,6 +69,7 @@ function toPostRow(raw: RawRow): PostRow {
     include_replies: asBit(raw.include_replies),
     total_hidden: asInt(raw.total_hidden),
     total_flagged: asInt(raw.total_flagged),
+    baselined_at: asNullableInt(raw.baselined_at),
     last_checked_at: asNullableInt(raw.last_checked_at),
     last_hidden_at: asNullableInt(raw.last_hidden_at),
     created_at: asInt(raw.created_at),

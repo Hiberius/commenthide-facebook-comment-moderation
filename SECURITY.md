@@ -129,3 +129,17 @@ or external assets.
 - Rotate the Page Access Token if you suspect exposure, and rotate
   `SESSION_SECRET` to invalidate every existing session at once.
 - Keep `RETENTION_DAYS` set so comment text does not accumulate indefinitely.
+
+## Known limits, stated plainly
+
+- **Rule patterns are operator-supplied code.** A `regex` rule is refused at creation time
+  if it has the shape of a catastrophically backtracking pattern, or if it exceeds a
+  short time budget against adversarial probes. Deciding this in general is undecidable,
+  so the check is best-effort; as a second line of defence a user regex is only ever run
+  against the first 400 characters of a comment.
+- **Sessions are bound to the current password.** Rotating `ADMIN_PASSWORD` invalidates
+  every session immediately. There is no per-session revocation beyond that.
+- **Login throttling is keyed on the client IP.** An attacker with many source addresses
+  is not slowed down by it, so `ADMIN_PASSWORD` still has to be a strong passphrase.
+- **The comment ledger is never pruned.** It is bounded by real comment volume rather
+  than by time, because every row in it carries a decision the poller must not re-make.

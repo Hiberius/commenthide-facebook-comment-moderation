@@ -6,7 +6,7 @@
 // live in tests/rules-matchers.test.ts.
 
 import { describe, expect, it } from "vitest";
-import { DEFAULT_RULES, compileRule, describeRule, evaluate } from "../src/lib/rules";
+import { DEFAULT_RULES, compileRule, describeRule, evaluate, regexSafetyProblem } from "../src/lib/rules";
 import type { RuleKind, RuleRow } from "../src/types";
 import { KEEP, comment, decide, makeRule } from "./support/rules-fixtures";
 
@@ -263,5 +263,28 @@ describe("DEFAULT_RULES", () => {
   it("keeps a two-character comment but hides a one-character one", () => {
     expect(evaluate(comment("ok"), seeded, "rules")).toEqual(KEEP);
     expect(evaluate(comment("."), seeded, "rules").verdict).toBe("hide");
+  });
+});
+
+describe("regexSafetyProblem", () => {
+  it("accepts patterns an operator would realistically write", () => {
+    for (const source of ["spam|scam", "^https?://", "(\\d{3}[- ]?){3}", "free\\s+followers"]) {
+      expect(regexSafetyProblem(source), source).toBeNull();
+    }
+  });
+
+  it("rejects a pattern that backtracks catastrophically", () => {
+    // Eleven characters, compiles fine, and takes hours on a forty-character
+    // comment — so a commenter, not the operator, could stall every poll for
+    // that post permanently. Compiling is not a sufficient check.
+    for (const source of ["^(\\w+\\s?)+$", "(a+)+$", "^(a|a)*$"]) {
+      expect(regexSafetyProblem(source), source).toMatch(/backtracks/);
+    }
+  });
+
+  it("rejects an empty, over-long or uncompilable pattern", () => {
+    expect(regexSafetyProblem("   ")).toMatch(/needs a pattern/);
+    expect(regexSafetyProblem("a".repeat(201))).toMatch(/at most/);
+    expect(regexSafetyProblem("([unclosed")).toMatch(/not a valid/);
   });
 });

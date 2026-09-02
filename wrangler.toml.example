@@ -9,7 +9,8 @@ compatibility_flags = ["nodejs_compat"]
 # Public, non-secret configuration.
 [vars]
 GRAPH_API_VERSION = "v25.0"
-# Delete audit events and processed-comment rows older than this. 0 disables pruning.
+# Delete audit events older than this. 0 disables pruning. The comment ledger is
+# never pruned: every row carries a decision the poller must not make twice.
 RETENTION_DAYS = "30"
 # Development only. Points the Graph client at a different origin so you can run
 # CommentHide against a mock instead of Meta. Leave it out in production.

@@ -81,7 +81,7 @@ const dryBanner = `
   ${icon("beaker", "ico lg")}
   <p>
     <strong>Dry run.</strong>
-    <span id="dry-banner-text">Decisions are recorded but nothing is hidden on Facebook.</span>
+    <span id="dry-banner-text">Decisions are recorded; the automatic check hides nothing on Facebook.</span>
   </p>
 </div>`;
 

@@ -38,6 +38,8 @@ export interface CallInit {
 
 export class GraphTransport {
   private readonly base: string;
+  /** Every absolute URL this client will follow must match this origin. */
+  private readonly origin: string;
   private readonly fetchImpl: typeof fetch;
   private readonly maxRetries: number;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -46,8 +48,9 @@ export class GraphTransport {
 
   constructor(secret: string, opts: TransportOptions = {}) {
     this.secret = secret;
-    const origin = (opts.apiBase ?? DEFAULT_API_BASE).replace(/\/+$/, "");
-    this.base = `${origin}/${opts.version ?? DEFAULT_VERSION}`;
+    const root = (opts.apiBase ?? DEFAULT_API_BASE).replace(/\/+$/, "");
+    this.base = `${root}/${opts.version ?? DEFAULT_VERSION}`;
+    this.origin = new URL(root).origin;
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
     this.maxRetries = Math.max(opts.maxRetries ?? 3, 0);
     this.sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -56,6 +59,13 @@ export class GraphTransport {
   /** `pathOrUrl` is either an edge path or a full paging.next URL. */
   async call<T>(pathOrUrl: string, init: CallInit): Promise<GraphResult<T>> {
     const url = this.buildUrl(pathOrUrl, init.query);
+    if (url === null) {
+      return this.fail(
+        0,
+        "foreign_origin",
+        "Refused to send the access token to a URL outside the configured Graph API origin.",
+      );
+    }
     for (let attempt = 0; ; attempt += 1) {
       const result = await this.attempt<T>(url, init);
       if (result.ok || result.retryable !== true || attempt >= this.maxRetries) return result;
@@ -79,9 +89,16 @@ export class GraphTransport {
     try {
       res = await this.fetchImpl(url, buildRequest(init));
     } catch (err) {
+      const thrown = describeThrown(err);
+      // The Workers runtime throws this when the per-invocation subrequest cap
+      // is spent. Retrying can only fail again, and each attempt costs backoff
+      // the rest of the run cannot afford.
+      if (/too many subrequests/i.test(thrown)) {
+        return this.fail(0, "subrequest_limit", `Cloudflare subrequest limit reached: ${thrown}`, false);
+      }
       // Not covered by isRetryable, which mirrors the documented Graph codes —
       // but a dropped connection is exactly what a retry is for.
-      return this.fail(0, undefined, `Could not reach the Graph API: ${describeThrown(err)}`, true);
+      return this.fail(0, undefined, `Could not reach the Graph API: ${thrown}`, true);
     }
 
     const raw = await res.text().catch(() => "");
@@ -119,9 +136,25 @@ export class GraphTransport {
     };
   }
 
-  private buildUrl(pathOrUrl: string, query?: Record<string, string | number>): string {
+  /**
+   * Returns null when the URL is not one this client may send a token to.
+   *
+   * paging.next is a fully-qualified URL that arrives inside a Graph response
+   * body. Every request carries the Page token in an Authorization header, so
+   * following a cursor that named another origin would hand that token to
+   * whoever wrote the response. The origin is checked against the configured
+   * base, which also keeps GRAPH_API_BASE safe by construction: a mock's own
+   * cursors share the mock's origin.
+   */
+  private buildUrl(pathOrUrl: string, query?: Record<string, string | number>): string | null {
     const absolute = /^https?:\/\//i.test(pathOrUrl);
-    const url = new URL(absolute ? pathOrUrl : `${this.base}/${pathOrUrl.replace(/^\/+/, "")}`);
+    let url: URL;
+    try {
+      url = new URL(absolute ? pathOrUrl : `${this.base}/${pathOrUrl.replace(/^\/+/, "")}`);
+    } catch {
+      return null;
+    }
+    if (absolute && url.origin !== this.origin) return null;
     // paging.next arrives with the token baked into the query string. Strip it —
     // URLs get logged, headers do not.
     url.searchParams.delete("access_token");

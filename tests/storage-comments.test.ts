@@ -173,7 +173,7 @@ describe("events and retention", () => {
     expect((await store.recentEvents(db, 1)).map((event) => event.action)).toEqual(["hide"]);
   });
 
-  it("prunes old events and old non-hidden comments, sparing the audit trail", async () => {
+  it("prunes old events and leaves the comment ledger completely alone", async () => {
     const cutoff = T0;
 
     await insertEvent(cutoff - 2, "old-a");
@@ -183,26 +183,33 @@ describe("events and retention", () => {
 
     await insertComment("old-seen", "p-1", "seen", cutoff - 1);
     await insertComment("old-hidden", "p-1", "hidden", cutoff - 1);
+    await insertComment("old-restored", "p-1", "restored", cutoff - 1);
+    await insertComment("old-skipped", "p-1", "skipped", cutoff - 1);
     await insertComment("fresh-seen", "p-1", "seen", cutoff + 1);
 
     const pruned = await store.pruneHistory(db, cutoff);
 
-    expect(pruned).toEqual({ events: 2, comments: 1 });
+    expect(pruned.events).toBe(2);
     expect((await store.recentEvents(db)).map((event) => event.action)).toEqual([
       "fresh",
       "at-cutoff",
     ]);
-    expect(await store.getComment(db, "old-seen")).toBeNull();
-    // Hidden rows are what makes "show this comment again" possible.
-    expect(await store.getComment(db, "old-hidden")).not.toBeNull();
-    expect(await store.getComment(db, "fresh-seen")).not.toBeNull();
+
+    // Every comment row carries a standing decision. A `seen` row written when
+    // a post was activated is the only thing keeping that pre-existing comment
+    // out of scope; a `restored` row is the only thing stopping a comment the
+    // operator un-hid from being hidden again on the next tick. Deleting any of
+    // them makes the poller re-decide history it had already settled.
+    for (const id of ["old-seen", "old-hidden", "old-restored", "old-skipped", "fresh-seen"]) {
+      expect(await store.getComment(db, id), `${id} must survive retention`).not.toBeNull();
+    }
   });
 
   it("deletes nothing when there is nothing old enough", async () => {
     await insertEvent(T0 + 10, "fresh");
     await insertComment("fresh-only", "p-1", "seen", T0 + 10);
 
-    expect(await store.pruneHistory(db, T0)).toEqual({ events: 0, comments: 0 });
+    expect(await store.pruneHistory(db, T0)).toEqual({ events: 0, authAttempts: 0 });
     expect((await store.recentEvents(db)).length).toBe(1);
   });
 });

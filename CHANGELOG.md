@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-02
+
+### Fixed
+
+- **Retention no longer deletes the comment ledger.** `pruneHistory` used to remove any
+  comment row that was not `hidden`, including the `seen` rows written when a post is
+  activated. Those rows are the only thing keeping pre-existing comments out of scope, so
+  after `RETENTION_DAYS` the poller re-decided conversation that predated CommentHide and
+  hid whatever matched. It also erased `restored` rows, silently re-hiding comments the
+  operator had deliberately un-hidden. Only events and stale login attempts are pruned now.
+- **A dry run no longer settles the ledger.** Previewing a comment wrote a terminal row
+  for it, so switching dry run off never hid anything the preview had promised. Dry-run
+  rows are now re-decided by the first real run.
+- **A post whose baseline did not complete is refused by every poll path.** "Run now" and
+  the Active toggle both used to walk past the pause that protects such a post.
+- **Overlapping runs can no longer both act on one comment.** The ledger row is claimed
+  before the Graph write, so the loser of a race skips the comment instead of sending a
+  duplicate hide and doubling the counters.
+- **A permanently failing hide is retried three times, not forever.** It previously
+  re-attempted every sixty seconds indefinitely, which is the fastest way to get an app
+  rate-limited by Meta.
+- **The Graph client will not send the access token to another origin.** A `paging.next`
+  cursor naming a foreign host was followed with the `Authorization` header attached.
+- **Pagination stops on the cursor, not on an empty page**, and warns instead of silently
+  truncating. The activation baseline now pages to the end.
+- **`/me/accounts` is paged**, so an account administering more than 100 Pages is no
+  longer told it does not manage a Page it owns.
+- **Replies cost no extra requests.** `filter=stream` already returns them flattened; the
+  client used to walk each parent's reply edge as well, spending up to 25 subrequests per
+  poll re-fetching comments it already had.
+- **Login throttling is keyed on the IP alone.** Including the User-Agent let an attacker
+  reset the counter on every request simply by varying a header they control.
+- **Rotating `ADMIN_PASSWORD` invalidates existing sessions.**
+- **A misconfigured Worker answers like a wrong password**, instead of naming the secret
+  that is missing.
+- **`__Host-` cookies are only relaxed on a local development host**, not on any request
+  that happens to arrive over plain HTTP.
+- **Regex rules are checked for catastrophic backtracking** before they are stored, and
+  are only ever run against the first 400 characters of a comment.
+- **Retention self-throttles to once an hour** instead of depending on the cron tick at
+  UTC minute zero being delivered.
+- The comment inspector reports **"Already decided"** instead of promising a verdict for a
+  comment the next check will not revisit.
+
+### Added
+
+- `posts.baselined_at` and `comments.attempts` (migration `0002_ledger_integrity.sql`).
+- A per-run read budget so a poll stays inside Cloudflare's subrequest cap.
+- A circuit breaker that stops making requests once Meta is rate limiting the token.
+
 ## [1.0.0] - 2026-09-02
 
 First public release.

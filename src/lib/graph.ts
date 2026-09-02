@@ -18,7 +18,7 @@ import type {
   ResolvedTarget,
 } from "../types";
 import { GraphTransport } from "./graph-http";
-import { failedTest, isFatalAuth, normalizePostInput } from "./graph-parse";
+import { failedTest, normalizePostInput } from "./graph-parse";
 
 // The contract puts these two on graph.ts; they live in graph-parse.ts only so
 // every file stays under the line ceiling.
@@ -26,10 +26,29 @@ export { normalizePostInput, isRetryable } from "./graph-parse";
 
 const POST_FIELDS = "id,message,created_time,permalink_url";
 const COMMENT_FIELDS = "id,message,created_time,from,can_hide,is_hidden,comment_count";
-const REPLY_FIELDS = "id,message,created_time,from,can_hide,is_hidden";
 
-/** One huge thread must not consume a whole one-minute poll window. */
-const MAX_REPLY_PARENTS = 25;
+/**
+ * Read requests one client may make. Cloudflare's free plan allows 50
+ * subrequests per invocation; the rest of the budget is left for hides.
+ */
+const DEFAULT_READ_BUDGET = 24;
+
+/** After this many rate-limit answers, stop asking for the rest of the run. */
+const MAX_RATE_LIMIT_HITS = 3;
+
+/** Graph codes that mean "you are being throttled". */
+const RATE_LIMIT_CODES = new Set<number | string>([4, 17, 32, 613]);
+
+/** Upper bound even for an exhaustive walk — 5000 comments is not a poll. */
+const EXHAUSTIVE_MAX_PAGES = 50;
+
+/** 5 x 100 covers any realistic agency account. */
+const MAX_ACCOUNT_PAGES = 5;
+
+interface AccountsPage {
+  data?: { id?: string; access_token?: string }[];
+  paging?: { next?: string };
+}
 
 export interface GraphClientOptions {
   version?: string;
@@ -50,15 +69,29 @@ export interface GraphClientOptions {
    * GRAPH_API_BASE in wrangler.toml.example.
    */
   apiBase?: string;
+  /** Outbound read requests this client may make. Default 24. */
+  readBudget?: number;
 }
 
 export interface FetchCommentsOptions {
   /** Page size, max 100. Default 100. */
   limit?: number;
-  /** Follow paging.next up to this many pages. Default 3. */
+  /** Follow paging.next up to this many pages. Default 10 (1000 comments). */
   maxPages?: number;
-  /** Also fetch replies for comments whose comment_count > 0. Default false. */
+  /**
+   * Include nested replies. The comments edge does this natively: filter=stream
+   * returns replies flattened into the same list, filter=toplevel does not.
+   * Walking each parent's reply edge separately — which an earlier version did —
+   * cost up to 25 extra subrequests per poll to re-fetch comments the first
+   * call had already returned.
+   */
   includeReplies?: boolean;
+  /**
+   * Page until the cursor runs out rather than stopping at maxPages. Used for
+   * the activation baseline, where missing a comment means later hiding
+   * conversation that pre-dates the operator.
+   */
+  exhaustive?: boolean;
 }
 
 export class GraphClient {
@@ -70,11 +103,35 @@ export class GraphClient {
   private readonly targets = new Map<string, Promise<GraphResult<ResolvedTarget>>>();
   private identityPromise: Promise<GraphResult<GraphPageIdentity>> | null = null;
   private pageTokensPromise: Promise<GraphResult<ReadonlyMap<string, string>>> | null = null;
+  /**
+   * Cloudflare allows 50 outbound subrequests per invocation on the free plan.
+   * Reads are budgeted so a poll always keeps requests in hand for the hides it
+   * is there to perform, instead of walking into the platform limit mid-run.
+   */
+  private readsLeft: number;
+  private rateLimitHits = 0;
 
   constructor(token: string, opts: GraphClientOptions = {}) {
     this.token = token;
     this.http = new GraphTransport(token, opts);
     this.onWarning = opts.onWarning ?? (() => undefined);
+    this.readsLeft = Math.max(opts.readBudget ?? DEFAULT_READ_BUDGET, 1);
+  }
+
+  /** Consumes one read from the budget. Returns a message when it is spent. */
+  private spendRead(): string | null {
+    if (this.rateLimitHits >= MAX_RATE_LIMIT_HITS) {
+      return "Facebook is rate limiting this token; stopped making requests for this run.";
+    }
+    if (this.readsLeft <= 0) {
+      return "Request budget for this run is spent; stopped reading so hides still have room.";
+    }
+    this.readsLeft -= 1;
+    return null;
+  }
+
+  private noteRateLimit(code: number | string | undefined): void {
+    if (code !== undefined && RATE_LIMIT_CODES.has(code)) this.rateLimitHits += 1;
   }
 
   async identity(): Promise<GraphResult<GraphPageIdentity>> {
@@ -122,42 +179,67 @@ export class GraphClient {
     opts: FetchCommentsOptions = {},
   ): Promise<GraphResult<GraphComment[]>> {
     const limit = Math.min(Math.max(opts.limit ?? 100, 1), 100);
-    const maxPages = Math.max(opts.maxPages ?? 3, 1);
+    const maxPages =
+      opts.exhaustive === true ? EXHAUSTIVE_MAX_PAGES : Math.max(opts.maxPages ?? 10, 1);
+    // filter=stream returns replies flattened into the same list; toplevel does
+    // not. One request either way — the reply toggle changes what is asked for,
+    // not how many calls are made.
+    const filter = opts.includeReplies === true ? "stream" : "toplevel";
     const collected: GraphComment[] = [];
     const seen = new Set<string>();
     let cursor: string | null = null;
+    let truncated = false;
 
-    for (let page = 0; page < maxPages; page += 1) {
+    for (let page = 0; ; page += 1) {
+      if (page >= maxPages) {
+        truncated = cursor !== null;
+        break;
+      }
+      const budget = this.spendRead();
+      if (budget !== null) {
+        truncated = true;
+        this.onWarning(budget);
+        break;
+      }
+
       const res: GraphResult<GraphCommentsPage> =
         cursor === null
           ? await this.http.call<GraphCommentsPage>(`${target.postId}/comments`, {
               token: target.accessToken,
-              query: {
-                filter: "stream",
-                order: "reverse_chronological",
-                limit,
-                fields: COMMENT_FIELDS,
-              },
+              query: { filter, order: "reverse_chronological", limit, fields: COMMENT_FIELDS },
             })
           : await this.http.call<GraphCommentsPage>(cursor, { token: target.accessToken });
-      if (!res.ok) return res;
+      if (!res.ok) {
+        this.noteRateLimit(res.code);
+        // A partial read is worse than no read for the baseline, and for a poll
+        // the next minute will try again.
+        return res;
+      }
 
-      const batch = res.data.data ?? [];
-      if (batch.length === 0) break; // Empty page — nothing left to walk.
-      for (const comment of batch) {
+      for (const comment of res.data.data ?? []) {
         if (seen.has(comment.id)) continue;
         seen.add(comment.id);
         collected.push(comment);
       }
-      // Annotated because `cursor` feeds the request that produced it, and TS
-      // would otherwise call the inference circular.
+
+      // An empty page is not the end of the edge: a window whose comments were
+      // all deleted returns no rows alongside a live cursor. Only the absence
+      // of a cursor ends the walk.
       const next: string | undefined = res.data.paging?.next;
       if (next === undefined || next === "") break;
       cursor = next;
     }
 
-    if (opts.includeReplies !== true) return { ok: true, data: collected };
-    return this.withReplies(collected, target);
+    if (truncated) {
+      const message =
+        `Stopped after ${collected.length} comments on post ${target.postId} — more remain. ` +
+        "Raise the page budget or reduce how many posts one run has to cover.";
+      this.onWarning(message);
+      if (opts.exhaustive === true) {
+        return this.http.fail(0, "incomplete_baseline", message);
+      }
+    }
+    return { ok: true, data: collected };
   }
 
   async setHidden(
@@ -265,50 +347,41 @@ export class GraphClient {
     return result;
   }
 
+  /**
+   * Every Page this token administers, following the cursor. Reading only the
+   * first page told anyone administering more than 100 Pages that a Page they
+   * do own "is not managed by this token" — advice that sends them off to
+   * regenerate a token that was correct all along.
+   */
   private async loadPageTokens(): Promise<GraphResult<ReadonlyMap<string, string>>> {
-    const res = await this.http.call<{ data?: { id?: string; access_token?: string }[] }>("me/accounts", {
-      token: this.token,
-      query: { fields: "id,name,access_token", limit: 100 },
-    });
-    if (!res.ok) return res;
     const map = new Map<string, string>();
-    for (const account of res.data.data ?? []) {
-      if (account.id !== undefined && account.access_token !== undefined) {
-        map.set(account.id, account.access_token);
+    let cursor: string | null = null;
+
+    for (let page = 0; page < MAX_ACCOUNT_PAGES; page += 1) {
+      const res: GraphResult<AccountsPage> =
+        cursor === null
+          ? await this.http.call<AccountsPage>("me/accounts", {
+              token: this.token,
+              query: { fields: "id,name,access_token", limit: 100 },
+            })
+          : await this.http.call<AccountsPage>(cursor, { token: this.token });
+      if (!res.ok) {
+        this.noteRateLimit(res.code);
+        // A first page that failed is a real failure; a later one still leaves
+        // a usable map, and tokenFor reports honestly if the Page is missing.
+        if (map.size === 0) return res;
+        break;
       }
+      for (const account of res.data.data ?? []) {
+        if (account.id !== undefined && account.access_token !== undefined) {
+          map.set(account.id, account.access_token);
+        }
+      }
+      const next: string | undefined = res.data.paging?.next;
+      if (next === undefined || next === "") break;
+      cursor = next;
     }
     return { ok: true, data: map };
   }
 
-  private async withReplies(
-    parents: readonly GraphComment[],
-    target: ResolvedTarget,
-  ): Promise<GraphResult<GraphComment[]>> {
-    const out = [...parents];
-    const seen = new Set(parents.map((c) => c.id));
-    let visited = 0;
-
-    for (const parent of parents) {
-      if (visited >= MAX_REPLY_PARENTS) break;
-      if ((parent.comment_count ?? 0) <= 0) continue;
-      visited += 1;
-
-      const res = await this.http.call<GraphCommentsPage>(`${parent.id}/comments`, {
-        token: target.accessToken,
-        query: { fields: REPLY_FIELDS, limit: 100 },
-      });
-      if (!res.ok) {
-        // A token/permission failure would break every later call too.
-        if (isFatalAuth(res.code)) return res;
-        this.onWarning(`Replies for comment ${parent.id} could not be read: ${res.message}`);
-        continue;
-      }
-      for (const reply of res.data.data ?? []) {
-        if (seen.has(reply.id)) continue;
-        seen.add(reply.id);
-        out.push(reply);
-      }
-    }
-    return { ok: true, data: out };
-  }
 }

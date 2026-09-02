@@ -24,6 +24,12 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 const encoder = new TextEncoder();
 
+/** Hosts allowed to fall back to non-Secure cookies for local development. */
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]);
+
+/** One message for every failed sign-in, whatever the underlying reason. */
+const INVALID_CREDENTIALS = "Incorrect password.";
+
 interface CookieNames {
   session: string;
   csrf: string;
@@ -39,7 +45,13 @@ interface CookieNames {
 function cookieNames(c: Context<AppEnv>): CookieNames {
   let secure = true;
   try {
-    secure = new URL(c.req.url).protocol === "https:";
+    const url = new URL(c.req.url);
+    // Only a local development host may take the weaker cookies. Keying this on
+    // "not https" alone would let anything that reached the Worker over plain
+    // http — a misconfigured proxy, a stripped TLS hop — downgrade a production
+    // deployment to non-Secure, unprefixed names.
+    const local = LOCAL_HOSTS.has(url.hostname) || url.hostname.endsWith(".localhost");
+    secure = url.protocol === "https:" || !local;
   } catch {
     // A malformed URL should never reach us; assume the hardened variant.
     secure = true;
@@ -55,6 +67,16 @@ function bytesToBase64Url(bytes: Uint8Array): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+/**
+ * Binds the session signature to the current password as well as the signing
+ * key, so rotating ADMIN_PASSWORD immediately invalidates every session that
+ * was issued under the old one. Without this a leaked session survived the
+ * password change it was supposed to be revoked by, for a further seven days.
+ */
+async function sessionKeyMaterial(env: AppEnv["Bindings"]): Promise<string> {
+  return `${env.SESSION_SECRET}\n${await sha256Hex(env.ADMIN_PASSWORD ?? "")}`;
+}
+
 async function signIssuedAt(issuedAt: number, secret: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
@@ -67,11 +89,16 @@ async function signIssuedAt(issuedAt: number, secret: string): Promise<string> {
   return bytesToBase64Url(new Uint8Array(signature));
 }
 
-/** Identifies the caller for throttling without storing an IP address. */
+/**
+ * Identifies the caller for throttling without storing an IP address.
+ *
+ * The IP alone, deliberately. Mixing in the User-Agent gave the attacker a
+ * field they control: varying it produced a fresh bucket on every request and
+ * the lockout never triggered at all.
+ */
 async function clientFingerprint(c: Context<AppEnv>): Promise<string> {
   const ip = c.req.header("cf-connecting-ip") ?? "unknown-ip";
-  const ua = c.req.header("user-agent") ?? "unknown-ua";
-  return sha256Hex(`${ip}\n${ua}`);
+  return sha256Hex(ip);
 }
 
 function secondsUntil(target: number | null, now: number): number | undefined {
@@ -79,10 +106,10 @@ function secondsUntil(target: number | null, now: number): number | undefined {
   return Math.max(1, Math.ceil((target - now) / 1000));
 }
 
-async function issueSession(c: Context<AppEnv>, secret: string): Promise<void> {
+async function issueSession(c: Context<AppEnv>): Promise<void> {
   const names = cookieNames(c);
   const issuedAt = Math.floor(Date.now() / 1000);
-  const signature = await signIssuedAt(issuedAt, secret);
+  const signature = await signIssuedAt(issuedAt, await sessionKeyMaterial(c.env));
   setCookie(c, names.session, `${issuedAt}.${signature}`, {
     httpOnly: true,
     secure: names.secure,
@@ -98,11 +125,14 @@ export async function login(
 ): Promise<{ ok: true } | { ok: false; error: string; retryAfterSec?: number }> {
   const secret = c.env.SESSION_SECRET;
   const expected = c.env.ADMIN_PASSWORD;
-  if (typeof secret !== "string" || secret.length === 0) {
-    return { ok: false, error: "SESSION_SECRET is not configured on this Worker." };
-  }
-  if (typeof expected !== "string" || expected.length === 0) {
-    return { ok: false, error: "ADMIN_PASSWORD is not configured on this Worker." };
+  // A misconfigured Worker answers exactly like a wrong password. Naming the
+  // missing secret told an anonymous caller how the deployment is set up.
+  const configured =
+    typeof secret === "string" && secret.length > 0 &&
+    typeof expected === "string" && expected.length > 0;
+  if (!configured) {
+    console.error("commenthide: ADMIN_PASSWORD or SESSION_SECRET is not configured");
+    return { ok: false, error: INVALID_CREDENTIALS };
   }
 
   const now = Date.now();
@@ -124,13 +154,13 @@ export async function login(
     const retryAfterSec = secondsUntil(after.lockedUntil, now);
     const error =
       retryAfterSec === undefined
-        ? "Incorrect password."
+        ? INVALID_CREDENTIALS
         : "Too many failed attempts. Try again shortly.";
     return retryAfterSec === undefined ? { ok: false, error } : { ok: false, error, retryAfterSec };
   }
 
   await clearAuthFailures(c.env.DB, fingerprint);
-  await issueSession(c, secret);
+  await issueSession(c);
   return { ok: true };
 }
 
@@ -160,7 +190,7 @@ export async function isAuthed(c: Context<AppEnv>): Promise<boolean> {
 
   let expected: string;
   try {
-    expected = await signIssuedAt(issuedAt, secret);
+    expected = await signIssuedAt(issuedAt, await sessionKeyMaterial(c.env));
   } catch {
     // An unusable SESSION_SECRET must fail closed, not throw a 500 at a visitor.
     return false;

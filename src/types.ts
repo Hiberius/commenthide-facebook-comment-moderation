@@ -48,6 +48,12 @@ export interface PostRow {
   total_flagged: number;
   last_checked_at: number | null;
   last_hidden_at: number | null;
+  /**
+   * When the pre-existing comments on this post were successfully recorded as
+   * seen. Null means the baseline never completed, and the post must not be
+   * polled: doing so would hide conversation that pre-dates CommentHide.
+   */
+  baselined_at: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -98,6 +104,8 @@ export interface CommentRow {
   first_seen_at: number;
   actioned_at: number | null;
   error_message: string | null;
+  /** Failed hide attempts. Bounded so a permanent failure is not retried forever. */
+  attempts: number;
 }
 
 export type EventLevel = "info" | "warn" | "error";
@@ -253,6 +261,10 @@ export interface CommentView {
   canHide: boolean;
   status: CommentStatus | null;
   reason: string | null;
-  /** What the current rule set would do to this comment right now. */
-  wouldBe: Verdict;
+  /**
+   * What a real poll would do to this comment right now — not the raw rule
+   * verdict. "settled" means the comment already carries a decision the poller
+   * will not revisit, so no rule outcome can apply to it any more.
+   */
+  wouldBe: Verdict | "settled";
 }
