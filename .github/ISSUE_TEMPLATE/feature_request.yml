@@ -1,0 +1,83 @@
+name: 💡 Feature request
+description: Suggest a capability CommentHide does not have yet.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        CommentHide is deliberately small: one Worker, one D1 database, no
+        third-party services and no telemetry. Proposals that keep it that way
+        are much more likely to land.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched the existing issues and this is not a duplicate.
+          required: true
+        - label: I read `docs/CONTRACT.md` and this is not already covered there.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you unable to do today? Describe the situation, not the solution.
+      placeholder: >
+        I moderate several posts that each need a different keyword list, and
+        today I have to duplicate every rule per post.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like instead
+      description: Be concrete. If it touches the API or the schema, say how.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of the project
+      options:
+        - A new rule kind
+        - Rule engine behaviour
+        - Poll loop or scheduling
+        - Dashboard UI
+        - HTTP API
+        - Storage or schema
+        - Setup, docs or tooling
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: rule-kind
+    attributes:
+      label: If this is a new rule kind
+      description: >
+        What the `pattern` means, exactly when it matches, and why none of the
+        seven existing kinds can express it. New kinds must be pure, must not
+        backtrack catastrophically, and must not read as suppressing ordinary
+        criticism.
+      placeholder: |
+        kind: repeated_author
+        pattern: integer threshold, default 3
+        matches when: the same author id has posted at least N comments on the post
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including doing it outside CommentHide, or with the existing rule kinds.
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I would be willing to open a pull request for this.

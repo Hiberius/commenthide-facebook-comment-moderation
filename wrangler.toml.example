@@ -1,0 +1,35 @@
+# CommentHide — copy this file to wrangler.toml and fill in your own values.
+# wrangler.toml is gitignored because it holds your D1 database id.
+
+name = "commenthide"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Public, non-secret configuration.
+[vars]
+GRAPH_API_VERSION = "v25.0"
+# Delete audit events and processed-comment rows older than this. 0 disables pruning.
+RETENTION_DAYS = "30"
+# Development only. Points the Graph client at a different origin so you can run
+# CommentHide against a mock instead of Meta. Leave it out in production.
+# GRAPH_API_BASE = "http://127.0.0.1:8788"
+
+# D1 binding.
+#   npm run db:create        -> prints your database_id
+#   npm run db:apply:remote  -> applies migrations
+[[d1_databases]]
+binding = "DB"
+database_name = "commenthide"
+database_id = "PASTE_YOUR_D1_DATABASE_ID_HERE"
+migrations_dir = "migrations"
+
+# Poll every minute. Cron triggers only fire on deployed Workers,
+# never under `wrangler dev` — use "Run now" in the dashboard locally.
+[triggers]
+crons = ["* * * * *"]
+
+# Secrets are never stored in this file. Set them once with:
+#   wrangler secret put ADMIN_PASSWORD
+#   wrangler secret put ENCRYPTION_KEY   # openssl rand -base64 32
+#   wrangler secret put SESSION_SECRET   # openssl rand -base64 48

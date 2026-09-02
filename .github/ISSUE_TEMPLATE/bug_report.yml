@@ -1,0 +1,137 @@
+name: 🐛 Bug report
+description: Something in CommentHide behaves differently from how it is documented.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file this.
+
+        **Before you paste anything:** redact your Page Access Token, your
+        session cookie and your `ENCRYPTION_KEY`. Replace each of them with
+        `[redacted]`. Never include a real comment author's name either.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched the existing issues and this is not a duplicate.
+          required: true
+        - label: I am running the latest `main` (or the latest release).
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Describe the actual behaviour.
+      placeholder: A comment matching the `link` rule was left visible on the post.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps, ending with the moment the problem appears.
+      placeholder: |
+        1. Add a post with mode "rules" and dry run off
+        2. Seed the default rules
+        3. Post a comment containing "example.com"
+        4. Press Run now
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where does it happen
+      options:
+        - Dashboard UI
+        - Rule engine (wrong verdict)
+        - Poll loop / cron
+        - Meta Graph API calls
+        - Login, session or CSRF
+        - Setup, migrations or deployment
+        - Something else
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Deployed Cloudflare Worker
+        - Local `wrangler dev`
+        - Both
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The release tag or the commit SHA you are running.
+      placeholder: v1.0.0 or 4f2a1c9
+    validations:
+      required: true
+
+  - type: textarea
+    id: rules
+    attributes:
+      label: Rule configuration involved
+      description: >
+        The rule kind, pattern, action and priority that should have matched
+        (or should not have). Paste the pattern verbatim — whitespace matters.
+      render: text
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Cloudflare Worker logs
+      description: >
+        Output from `npx wrangler tail` or the Workers dashboard around the
+        moment of failure. **Redact the access token before pasting** — CommentHide
+        redacts it in its own log lines, but not in anything you copy from
+        elsewhere.
+      placeholder: |
+        [info] poll.run post=[redacted] fetched=12 hidden=0 flagged=0 skipped=12
+        [error] graph.setHidden 400 code=190 message=... token=[redacted]
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: graph-error-code
+    attributes:
+      label: Graph API error code
+      description: >
+        If the Graph API returned an error, its numeric `code` (and `error_subcode`
+        if present). Leave blank if there was none.
+      placeholder: "190 (subcode 463)"
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Screenshots, browser, or notes that might matter.
+
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: Secrets
+      options:
+        - label: >
+            I confirm that no Page Access Token, session cookie, `ENCRYPTION_KEY`
+            or `SESSION_SECRET` appears anywhere in this issue.
+          required: true

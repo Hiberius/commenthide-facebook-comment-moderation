@@ -1,0 +1,47 @@
+{
+  "name": "commenthide",
+  "version": "1.0.0",
+  "private": false,
+  "description": "Self-hosted Facebook comment moderation for Meta Page posts. Auto-hide spam, links and keyword matches on Cloudflare Workers.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "db:create": "wrangler d1 create commenthide",
+    "db:apply:local": "wrangler d1 migrations apply commenthide --local",
+    "db:apply:remote": "wrangler d1 migrations apply commenthide --remote",
+    "setup": "node scripts/setup.mjs",
+    "mock:graph": "node scripts/mock-graph.mjs",
+    "dev:mock": "GRAPH_API_BASE=\"http://127.0.0.1:8788\" wrangler dev"
+  },
+  "keywords": [
+    "facebook",
+    "comment-moderation",
+    "meta-graph-api",
+    "cloudflare-workers",
+    "content-moderation",
+    "facebook-ads",
+    "self-hosted",
+    "spam-filter"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "hono": "^4.6.14"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20260902.1",
+    "@vitest/coverage-istanbul": "^4.1.11",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.128.0"
+  }
+}

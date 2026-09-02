@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Read-only. Nothing in CI needs to write to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+  build:
+    name: Worker builds
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # wrangler.toml is gitignored because it carries the operator's D1
+      # database id, so CI synthesises one from the example file. A dry run
+      # never contacts Cloudflare, so a placeholder id is enough.
+      - name: Write wrangler.toml from the example
+        run: |
+          sed 's/PASTE_YOUR_D1_DATABASE_ID_HERE/00000000-0000-0000-0000-000000000000/' \
+            wrangler.toml.example > wrangler.toml
+
+      - name: Build the Worker (dry run)
+        run: npx wrangler deploy --dry-run --outdir dist

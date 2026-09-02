@@ -1,0 +1,12 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Report a security vulnerability
+    url: https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability
+    about: >
+      Do not open a public issue. Use the Security tab on this repository and
+      choose "Report a vulnerability" — see SECURITY.md for what to include.
+  - name: 📘 Setup and configuration
+    url: https://developers.facebook.com/docs/graph-api/reference/page/
+    about: >
+      Page Access Token permissions and Graph API reference. Check these before
+      filing a bug about a Graph error code.

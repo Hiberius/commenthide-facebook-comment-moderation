@@ -1,0 +1,13 @@
+# Copy to .dev.vars for local development (`wrangler dev`).
+# In production these are Cloudflare secrets: `wrangler secret put <NAME>`.
+# .dev.vars is gitignored. Never commit real values.
+
+# Dashboard login password. Use a long, random passphrase.
+ADMIN_PASSWORD="change-me-to-a-long-random-passphrase"
+
+# AES-256-GCM key that encrypts the Page Access Token at rest.
+# Must be base64 of exactly 32 random bytes: openssl rand -base64 32
+ENCRYPTION_KEY="replace-with-base64-of-32-random-bytes"
+
+# HMAC-SHA256 key used to sign session cookies. openssl rand -base64 48
+SESSION_SECRET="replace-with-a-long-random-string"
