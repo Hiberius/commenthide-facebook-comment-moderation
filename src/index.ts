@@ -21,7 +21,7 @@ import session from "./routes/session";
 import system from "./routes/system";
 
 /** Reported by GET /health so a deployment can be identified without logging in. */
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 
 /** The only API request that may arrive without a session: logging in. */
 const LOGIN_PATH = "/api/session";
