@@ -172,7 +172,7 @@ live post without consequences.
 
 ## Quickstart
 
-You need a Cloudflare account (the free plan is enough), Node 20+, and a Facebook Page
+You need a Cloudflare account (the free plan is enough), Node 22+, and a Facebook Page
 you administer.
 
 ```bash

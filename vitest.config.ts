@@ -1,16 +1,14 @@
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 import {
   cloudflareTest,
   readD1Migrations,
 } from "@cloudflare/vitest-pool-workers";
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-
-// Migrations are read once at config time and handed to the test Worker as a
-// binding, so a suite can rebuild the schema without touching the filesystem.
-const migrations = await readD1Migrations(path.join(here, "migrations"));
+// Read once at config time and handed to the test Worker as a binding, so a
+// suite can rebuild the schema without touching the filesystem. The path is
+// relative to the project root, which is vitest's working directory — keeping
+// this file free of node: imports so it typechecks with Workers types alone.
+const migrations = await readD1Migrations("migrations");
 
 export default defineConfig({
   plugins: [

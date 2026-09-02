@@ -15,7 +15,7 @@ import { spawnSync } from "node:child_process";
 import process from "node:process";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const MIN_NODE_MAJOR = 20;
+const MIN_NODE_MAJOR = 22;
 
 // ---------------------------------------------------------------------------
 // Output. Colour is opt-out (NO_COLOR), opt-in (FORCE_COLOR), and off whenever

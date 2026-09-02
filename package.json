@@ -31,7 +31,7 @@
     "spam-filter"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
     "hono": "^4.6.14"
